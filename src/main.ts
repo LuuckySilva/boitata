@@ -1,4 +1,4 @@
-import { Application, Graphics } from 'pixi.js';
+import { Application, Graphics, Text } from 'pixi.js';
 
 const app = new Application();
 
@@ -29,27 +29,42 @@ async function main() {
   player.y = app.screen.height / 2;
   app.stage.addChild(player);
 
-  // ---- inimigos (wisps) ----
+  // ---- vida do player ----
+  const MAX_LIVES = 3;
+  let lives = MAX_LIVES;
+  const I_FRAME_DURATION = 1.0; // segundos de invencibilidade após tomar dano
+  let iFrameTimer = 0;
+
+  const livesText = new Text({
+    text: `Vidas: ${lives}`,
+    style: { fill: 0xe9ddc4, fontSize: 18, fontFamily: 'Courier New' },
+  });
+  livesText.x = 14;
+  livesText.y = 14;
+  app.stage.addChild(livesText);
+
+  // ---- inimigos ----
   const WISP_RADIUS = 10;
-  const WISP_SPEED = 90; // mais lento que o player (220) — dá pra fugir dele de propósito
+  const PLAYER_RADIUS = 16;
+  const WISP_SPEED = 90;
   const wisps: Wisp[] = [];
 
   function spawnWisp(x: number, y: number) {
     const g = new Graphics()
       .circle(0, 0, WISP_RADIUS).fill(0x2c1418)
-      .circle(3, -3, 2).fill(0xff3b3b); // "olho" vermelho
+      .circle(3, -3, 2).fill(0xff3b3b);
     g.x = x;
     g.y = y;
     app.stage.addChild(g);
     wisps.push({ x, y, g });
   }
 
-  // por enquanto, spawn manual fixo — sistema de onda vem depois
   spawnWisp(100, 100);
 
   const SPEED = 220;
   const STEP = 1 / 60;
   let accumulator = 0;
+  let gameOver = false;
 
   app.ticker.add((ticker) => {
     let frameTime = ticker.deltaMS / 1000;
@@ -62,10 +77,15 @@ async function main() {
   });
 
   function update(dt: number) {
+    if (gameOver) return;
+
     updatePlayer(dt);
     updateTrail();
     updateWisps(dt);
     checkTrailCollisions();
+    checkPlayerCollision(dt);
+
+    if (iFrameTimer > 0) iFrameTimer -= dt;
   }
 
   function updatePlayer(dt: number) {
@@ -87,6 +107,9 @@ async function main() {
 
     player.x = Math.max(16, Math.min(app.screen.width - 16, player.x));
     player.y = Math.max(16, Math.min(app.screen.height - 16, player.y));
+
+    // pisca durante i-frames — feedback visual de "acabei de tomar dano"
+    player.alpha = iFrameTimer > 0 ? (Math.floor(iFrameTimer * 10) % 2 === 0 ? 0.3 : 1) : 1;
   }
 
   function updateTrail() {
@@ -108,7 +131,6 @@ async function main() {
 
   function updateWisps(dt: number) {
     for (const w of wisps) {
-      // seek simples: vetor na direção do player, normalizado
       let dx = player.x - w.x;
       let dy = player.y - w.y;
       const len = Math.sqrt(dx * dx + dy * dy);
@@ -124,11 +146,14 @@ async function main() {
   }
 
   function checkTrailCollisions() {
-    // força bruta: cada wisp contra cada ponto da trilha — ok pra poucas entidades,
-    // vira gargalo na casa de centenas (aí entra a spatial grid da pesquisa)
+    // pula os pontos mais novos da trilha (ainda "em cima" do player) —
+    // sem isso, o corpo do inimigo encostando em você também conta como
+    // encostar na trilha, e ele morre antes de te causar dano
+    const HEAD_SKIP = 6;
+
     for (let wi = wisps.length - 1; wi >= 0; wi--) {
       const w = wisps[wi];
-      for (let i = 0; i < trailPositions.length; i++) {
+      for (let i = 0; i < trailPositions.length - HEAD_SKIP; i++) {
         const t = i / TRAIL_LENGTH;
         const trailRadius = 6 + t * 6;
         const p = trailPositions[i];
@@ -140,9 +165,31 @@ async function main() {
         if (distSq < hitDist * hitDist) {
           app.stage.removeChild(w.g);
           wisps.splice(wi, 1);
-          console.log('Inimigo queimado pela trilha');
-          break; // já morreu, não checa o resto dos pontos pra esse wisp
+          break;
         }
+      }
+    }
+  }
+
+  function checkPlayerCollision(dt: number) {
+    if (iFrameTimer > 0) return; // invencível — não checa dano
+
+    for (const w of wisps) {
+      const dx = player.x - w.x;
+      const dy = player.y - w.y;
+      const distSq = dx * dx + dy * dy;
+      const hitDist = PLAYER_RADIUS + WISP_RADIUS;
+
+      if (distSq < hitDist * hitDist) {
+        lives -= 1;
+        iFrameTimer = I_FRAME_DURATION;
+        livesText.text = `Vidas: ${lives}`;
+
+        if (lives <= 0) {
+          gameOver = true;
+          livesText.text = 'Voce morreu — F5 pra tentar de novo';
+        }
+        break; // só toma dano de um inimigo por contato
       }
     }
   }
