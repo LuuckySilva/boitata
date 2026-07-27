@@ -11,6 +11,51 @@ type Projectile = { x: number; y: number; dx: number; dy: number; g: Graphics };
 type Gem = { x: number; y: number; g: Graphics };
 type Upgrade = { title: string; desc: string; apply: () => void };
 
+class SpatialGrid<T extends { x: number; y: number }> {
+  private cellSize: number;
+  private cells: Map<string, T[]> = new Map();
+
+  constructor(cellSize: number) {
+    this.cellSize = cellSize;
+  }
+
+  private key(cx: number, cy: number): string {
+    return `${cx},${cy}`;
+  }
+
+  clear() {
+    this.cells.clear();
+  }
+
+  insert(item: T) {
+    const cx = Math.floor(item.x / this.cellSize);
+    const cy = Math.floor(item.y / this.cellSize);
+    const k = this.key(cx, cy);
+    let bucket = this.cells.get(k);
+    if (!bucket) {
+      bucket = [];
+      this.cells.set(k, bucket);
+    }
+    bucket.push(item);
+  }
+
+  queryNear(x: number, y: number, radius: number): T[] {
+    const result: T[] = [];
+    const minCx = Math.floor((x - radius) / this.cellSize);
+    const maxCx = Math.floor((x + radius) / this.cellSize);
+    const minCy = Math.floor((y - radius) / this.cellSize);
+    const maxCy = Math.floor((y + radius) / this.cellSize);
+
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        const bucket = this.cells.get(this.key(cx, cy));
+        if (bucket) result.push(...bucket);
+      }
+    }
+    return result;
+  }
+}
+
 async function main() {
   await app.init({
     width: 800,
@@ -20,13 +65,35 @@ async function main() {
 
   document.querySelector<HTMLDivElement>('#app')!.appendChild(app.canvas);
 
-  // ---- trilha ----
   let trailLength = 40;
   const trailPositions: { x: number; y: number }[] = [];
   const trailGraphics = new Graphics();
   app.stage.addChild(trailGraphics);
 
-  // ---- player ----
+  // ---- arena que encolhe ----
+  const arenaCenter = { x: app.screen.width / 2, y: app.screen.height / 2 };
+  const ARENA_RADIUS_START = 380;
+  const ARENA_RADIUS_MIN = 150;
+  const ARENA_SHRINK_DURATION = 90; // segundos até chegar no raio minimo
+  const arenaGraphics = new Graphics();
+  app.stage.addChild(arenaGraphics);
+
+  function currentArenaRadius(): number {
+    const progress = Math.min(gameTime / ARENA_SHRINK_DURATION, 1);
+    return ARENA_RADIUS_START - (ARENA_RADIUS_START - ARENA_RADIUS_MIN) * progress;
+  }
+
+  function drawArena() {
+    const radius = currentArenaRadius();
+    arenaGraphics.clear();
+    // três traços concêntricos com alpha decrescente pra simular brilho da borda
+    for (let i = 0; i < 3; i++) {
+      arenaGraphics
+        .circle(arenaCenter.x, arenaCenter.y, radius + i * 4)
+        .stroke({ width: 2, color: 0xff6a1f, alpha: 0.5 - i * 0.15 });
+    }
+  }
+
   const player = new Graphics().circle(0, 0, 16).fill(0xff6a1f);
   player.x = app.screen.width / 2;
   player.y = app.screen.height / 2;
@@ -35,13 +102,23 @@ async function main() {
   let playerSpeed = 220;
   const PLAYER_RADIUS = 16;
 
-  // ---- vida ----
   const MAX_LIVES = 3;
   let lives = MAX_LIVES;
   const I_FRAME_DURATION = 1.0;
   let iFrameTimer = 0;
 
-  // ---- HUD texto ----
+  // ---- centraliza a lógica de "tomar dano" — usada por inimigo e por arena ----
+  function damagePlayer() {
+    lives -= 1;
+    iFrameTimer = I_FRAME_DURATION;
+    livesText.text = `Vidas: ${lives}`;
+
+    if (lives <= 0) {
+      gameOver = true;
+      livesText.text = 'Voce morreu — F5 pra tentar de novo';
+    }
+  }
+
   const livesText = new Text({ text: `Vidas: ${lives}`, style: { fill: 0xe9ddc4, fontSize: 18, fontFamily: 'Courier New' } });
   livesText.x = 14; livesText.y = 14;
   app.stage.addChild(livesText);
@@ -65,10 +142,17 @@ async function main() {
     xpBarFill.rect(14, 88, 200 * pct, 8).fill(0xffb347);
   }
 
-  // ---- inimigos ----
   const WISP_RADIUS = 10;
   const WISP_SPEED = 90;
   const wisps: Wisp[] = [];
+
+  const CELL_SIZE = 60;
+  const wispGrid = new SpatialGrid<Wisp>(CELL_SIZE);
+
+  function rebuildWispGrid() {
+    wispGrid.clear();
+    for (const w of wisps) wispGrid.insert(w);
+  }
 
   function spawnWisp(x: number, y: number) {
     const g = new Graphics()
@@ -92,16 +176,18 @@ async function main() {
     spawnWisp(x, y);
   }
 
-  function removeWisp(index: number) {
-    app.stage.removeChild(wisps[index].g);
-    wisps.splice(index, 1);
+  function removeWisp(w: Wisp): boolean {
+    const idx = wisps.indexOf(w);
+    if (idx === -1) return false;
+    app.stage.removeChild(w.g);
+    wisps.splice(idx, 1);
+    return true;
   }
 
-  // mata o wisp E solta um gem — todo inimigo morto agora vira XP
-  function killWisp(index: number) {
-    const w = wisps[index];
-    spawnGem(w.x, w.y);
-    removeWisp(index);
+  function killWisp(w: Wisp) {
+    if (removeWisp(w)) {
+      spawnGem(w.x, w.y);
+    }
   }
 
   const SPAWN_INTERVAL_START = 2.0;
@@ -115,7 +201,6 @@ async function main() {
     return SPAWN_INTERVAL_START - (SPAWN_INTERVAL_START - SPAWN_INTERVAL_MIN) * progress;
   }
 
-  // ---- gems (XP) ----
   const GEM_RADIUS = 5;
   const MAGNET_RADIUS = 80;
   const GEM_SPEED = 260;
@@ -137,8 +222,7 @@ async function main() {
         const dist = Math.sqrt(distSq) || 1;
         gem.x += (dx / dist) * GEM_SPEED * dt;
         gem.y += (dy / dist) * GEM_SPEED * dt;
-        gem.g.x = gem.x;
-        gem.g.y = gem.y;
+        gem.g.x = gem.x; gem.g.y = gem.y;
       }
     }
   }
@@ -147,8 +231,7 @@ async function main() {
     const collectDist = PLAYER_RADIUS + GEM_RADIUS;
     for (let i = gems.length - 1; i >= 0; i--) {
       const gem = gems[i];
-      const dx = player.x - gem.x;
-      const dy = player.y - gem.y;
+      const dx = player.x - gem.x, dy = player.y - gem.y;
       if (dx * dx + dy * dy < collectDist * collectDist) {
         app.stage.removeChild(gem.g);
         gems.splice(i, 1);
@@ -157,7 +240,6 @@ async function main() {
     }
   }
 
-  // ---- XP / level ----
   let level = 1;
   let xp = 0;
   let xpToNext = 5;
@@ -175,7 +257,6 @@ async function main() {
     updateXpBar();
   }
 
-  // ---- arma ----
   let attackInterval = 0.5;
   let projectileCount = 1;
   const PROJECTILE_SPEED = 500;
@@ -187,8 +268,7 @@ async function main() {
     let nearest: Wisp | null = null;
     let nearestDistSq = Infinity;
     for (const w of wisps) {
-      const dx = w.x - player.x;
-      const dy = w.y - player.y;
+      const dx = w.x - player.x, dy = w.y - player.y;
       const distSq = dx * dx + dy * dy;
       if (distSq < nearestDistSq) { nearestDistSq = distSq; nearest = w; }
     }
@@ -199,19 +279,17 @@ async function main() {
     const target = findNearestWisp();
     if (!target) return;
 
-    let dx = target.x - player.x;
-    let dy = target.y - player.y;
+    let dx = target.x - player.x, dy = target.y - player.y;
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len > 0) { dx /= len; dy /= len; }
     const baseAngle = Math.atan2(dy, dx);
 
-    const spread = 0.25; // radianos entre projeteis extras, quando houver mais de 1
+    const spread = 0.25;
     const mid = (projectileCount - 1) / 2;
 
     for (let i = 0; i < projectileCount; i++) {
       const angle = baseAngle + (i - mid) * spread;
-      const pdx = Math.cos(angle);
-      const pdy = Math.sin(angle);
+      const pdx = Math.cos(angle), pdy = Math.sin(angle);
 
       const g = new Graphics().circle(0, 0, PROJECTILE_RADIUS).fill(0xffb347);
       g.x = player.x; g.y = player.y;
@@ -220,7 +298,6 @@ async function main() {
     }
   }
 
-  // ---- upgrades ----
   const UPGRADE_POOL: Upgrade[] = [
     { title: 'Ataque Rápido', desc: 'intervalo de tiro cai 15%', apply: () => { attackInterval = Math.max(0.15, attackInterval * 0.85); } },
     { title: 'Tiro Duplo', desc: '+1 projetil por disparo, em leque', apply: () => { projectileCount += 1; } },
@@ -297,7 +374,6 @@ async function main() {
     if (n >= 1 && n <= currentChoices.length) selectUpgrade(currentChoices[n - 1]);
   });
 
-  // ---- game loop ----
   const STEP = 1 / 60;
   let accumulator = 0;
   let gameOver = false;
@@ -314,7 +390,7 @@ async function main() {
 
   function update(dt: number) {
     if (gameOver) return;
-    if (paused) return; // tela de level-up ativa — mundo congela
+    if (paused) return;
 
     gameTime += dt;
     timeText.text = `Tempo: ${formatTime(gameTime)}`;
@@ -323,13 +399,18 @@ async function main() {
     updatePlayer(dt);
     updateTrail();
     updateWisps(dt);
+    drawArena();
+
+    rebuildWispGrid();
+
     updateWeapon(dt);
     updateProjectiles(dt);
     updateGems(dt);
     checkTrailCollisions();
     checkProjectileCollisions();
     checkGemCollection();
-    checkPlayerCollision(dt);
+    checkPlayerCollision();
+    checkArenaDamage();
 
     if (iFrameTimer > 0) iFrameTimer -= dt;
   }
@@ -384,8 +465,7 @@ async function main() {
 
   function updateWisps(dt: number) {
     for (const w of wisps) {
-      let dx = player.x - w.x;
-      let dy = player.y - w.y;
+      let dx = player.x - w.x, dy = player.y - w.y;
       const len = Math.sqrt(dx * dx + dy * dy);
       if (len > 0) { dx /= len; dy /= len; }
       w.x += dx * WISP_SPEED * dt;
@@ -419,17 +499,18 @@ async function main() {
 
   function checkTrailCollisions() {
     const HEAD_SKIP = 6;
-    for (let wi = wisps.length - 1; wi >= 0; wi--) {
-      const w = wisps[wi];
-      for (let i = 0; i < trailPositions.length - HEAD_SKIP; i++) {
-        const t = i / trailLength;
-        const trailRadius = 6 + t * 6;
-        const p = trailPositions[i];
+
+    for (let i = 0; i < trailPositions.length - HEAD_SKIP; i++) {
+      const t = i / trailLength;
+      const trailRadius = 6 + t * 6;
+      const p = trailPositions[i];
+
+      const nearby = wispGrid.queryNear(p.x, p.y, trailRadius + WISP_RADIUS);
+      for (const w of nearby) {
         const dx = w.x - p.x, dy = w.y - p.y;
         const hitDist = WISP_RADIUS + trailRadius;
         if (dx * dx + dy * dy < hitDist * hitDist) {
-          killWisp(wi);
-          break;
+          killWisp(w);
         }
       }
     }
@@ -438,35 +519,43 @@ async function main() {
   function checkProjectileCollisions() {
     for (let pi = projectiles.length - 1; pi >= 0; pi--) {
       const p = projectiles[pi];
-      for (let wi = wisps.length - 1; wi >= 0; wi--) {
-        const w = wisps[wi];
+      const nearby = wispGrid.queryNear(p.x, p.y, PROJECTILE_RADIUS + WISP_RADIUS);
+
+      for (const w of nearby) {
         const dx = p.x - w.x, dy = p.y - w.y;
         const hitDist = PROJECTILE_RADIUS + WISP_RADIUS;
         if (dx * dx + dy * dy < hitDist * hitDist) {
           app.stage.removeChild(p.g);
           projectiles.splice(pi, 1);
-          killWisp(wi);
+          killWisp(w);
           break;
         }
       }
     }
   }
 
-  function checkPlayerCollision(dt: number) {
+  function checkPlayerCollision() {
     if (iFrameTimer > 0) return;
     for (const w of wisps) {
       const dx = player.x - w.x, dy = player.y - w.y;
       const hitDist = PLAYER_RADIUS + WISP_RADIUS;
       if (dx * dx + dy * dy < hitDist * hitDist) {
-        lives -= 1;
-        iFrameTimer = I_FRAME_DURATION;
-        livesText.text = `Vidas: ${lives}`;
-        if (lives <= 0) {
-          gameOver = true;
-          livesText.text = 'Voce morreu — F5 pra tentar de novo';
-        }
+        damagePlayer();
         break;
       }
+    }
+  }
+
+  // fora do anel de segurança = dano. iFrameTimer > 0 já serve de cooldown
+  // natural aqui: ao ser queimado, você ganha ~1s pra voltar pro seguro
+  // antes de poder tomar dano de arena de novo
+  function checkArenaDamage() {
+    if (iFrameTimer > 0) return;
+    const dx = player.x - arenaCenter.x;
+    const dy = player.y - arenaCenter.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > currentArenaRadius()) {
+      damagePlayer();
     }
   }
 
