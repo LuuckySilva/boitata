@@ -29,10 +29,9 @@ async function main() {
   player.y = app.screen.height / 2;
   app.stage.addChild(player);
 
-  // ---- vida do player ----
   const MAX_LIVES = 3;
   let lives = MAX_LIVES;
-  const I_FRAME_DURATION = 1.0; // segundos de invencibilidade após tomar dano
+  const I_FRAME_DURATION = 1.0;
   let iFrameTimer = 0;
 
   const livesText = new Text({
@@ -43,7 +42,14 @@ async function main() {
   livesText.y = 14;
   app.stage.addChild(livesText);
 
-  // ---- inimigos ----
+  const timeText = new Text({
+    text: `Tempo: 0:00`,
+    style: { fill: 0xffb347, fontSize: 18, fontFamily: 'Courier New' },
+  });
+  timeText.x = 14;
+  timeText.y = 38;
+  app.stage.addChild(timeText);
+
   const WISP_RADIUS = 10;
   const PLAYER_RADIUS = 16;
   const WISP_SPEED = 90;
@@ -59,7 +65,34 @@ async function main() {
     wisps.push({ x, y, g });
   }
 
-  spawnWisp(100, 100);
+  // spawna numa borda aleatória, fora da área visível — inimigo nunca
+  // "nasce do nada" no meio do mapa, sempre vem de algum lugar
+  function spawnWispAtEdge() {
+    const edge = Math.floor(Math.random() * 4); // 0=topo 1=direita 2=baixo 3=esquerda
+    const margin = 30;
+    let x = 0, y = 0;
+
+    switch (edge) {
+      case 0: x = Math.random() * app.screen.width; y = -margin; break;
+      case 1: x = app.screen.width + margin; y = Math.random() * app.screen.height; break;
+      case 2: x = Math.random() * app.screen.width; y = app.screen.height + margin; break;
+      case 3: x = -margin; y = Math.random() * app.screen.height; break;
+    }
+
+    spawnWisp(x, y);
+  }
+
+  // ---- dificuldade ----
+  const SPAWN_INTERVAL_START = 2.0;  // 1 wisp a cada 2s no início
+  const SPAWN_INTERVAL_MIN = 0.4;    // nunca mais rápido que isso
+  const RAMP_DURATION = 60;          // em 60s, chega no intervalo mínimo
+  let spawnTimer = 0;
+  let gameTime = 0;
+
+  function currentSpawnInterval(): number {
+    const progress = Math.min(gameTime / RAMP_DURATION, 1);
+    return SPAWN_INTERVAL_START - (SPAWN_INTERVAL_START - SPAWN_INTERVAL_MIN) * progress;
+  }
 
   const SPEED = 220;
   const STEP = 1 / 60;
@@ -79,6 +112,10 @@ async function main() {
   function update(dt: number) {
     if (gameOver) return;
 
+    gameTime += dt;
+    timeText.text = `Tempo: ${formatTime(gameTime)}`;
+
+    updateSpawner(dt);
     updatePlayer(dt);
     updateTrail();
     updateWisps(dt);
@@ -86,6 +123,21 @@ async function main() {
     checkPlayerCollision(dt);
 
     if (iFrameTimer > 0) iFrameTimer -= dt;
+  }
+
+  function updateSpawner(dt: number) {
+    spawnTimer += dt;
+    const interval = currentSpawnInterval();
+    if (spawnTimer >= interval) {
+      spawnTimer -= interval;
+      spawnWispAtEdge();
+    }
+  }
+
+  function formatTime(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
   function updatePlayer(dt: number) {
@@ -108,7 +160,6 @@ async function main() {
     player.x = Math.max(16, Math.min(app.screen.width - 16, player.x));
     player.y = Math.max(16, Math.min(app.screen.height - 16, player.y));
 
-    // pisca durante i-frames — feedback visual de "acabei de tomar dano"
     player.alpha = iFrameTimer > 0 ? (Math.floor(iFrameTimer * 10) % 2 === 0 ? 0.3 : 1) : 1;
   }
 
@@ -146,9 +197,6 @@ async function main() {
   }
 
   function checkTrailCollisions() {
-    // pula os pontos mais novos da trilha (ainda "em cima" do player) —
-    // sem isso, o corpo do inimigo encostando em você também conta como
-    // encostar na trilha, e ele morre antes de te causar dano
     const HEAD_SKIP = 6;
 
     for (let wi = wisps.length - 1; wi >= 0; wi--) {
@@ -172,7 +220,7 @@ async function main() {
   }
 
   function checkPlayerCollision(dt: number) {
-    if (iFrameTimer > 0) return; // invencível — não checa dano
+    if (iFrameTimer > 0) return;
 
     for (const w of wisps) {
       const dx = player.x - w.x;
@@ -189,7 +237,7 @@ async function main() {
           gameOver = true;
           livesText.text = 'Voce morreu — F5 pra tentar de novo';
         }
-        break; // só toma dano de um inimigo por contato
+        break;
       }
     }
   }
